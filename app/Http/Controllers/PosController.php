@@ -61,8 +61,10 @@ class PosController extends Controller {
             }
 
             $discountAmount = 0;
+            $promoId = null;
             $promo = Promotion::where('is_active', true)->where('required', '<=', $subtotal)->orderByDesc('result')->first();
             if ($promo) {
+                $promoId = $promo->id;
                 $discountAmount = ($promo->typ_promotion_id == 2) ? ($subtotal * ($promo->result / 100)) : $promo->result;
             }
 
@@ -92,6 +94,7 @@ class PosController extends Controller {
 
             foreach ($preparedItems as $pItem) {
                 $pItem['order_id'] = $order->id;
+                $pItem['promotion_id'] = $promoId;
                 OrderDetail::create($pItem);
             }
 
@@ -136,8 +139,17 @@ class PosController extends Controller {
     public function listOrders(Request $request) {
         $start = $request->start_date ?? date('Y-m-d');
         $end = $request->end_date ?? date('Y-m-d');
-        $query = Order::whereBetween(DB::raw('DATE(created_at)'), [$start, $end])->orderByDesc('created_at');
-        if ($request->status) $query->where('status', $request->status);
+        
+        // Load relasi details agar data item produk ikut terbawa untuk cetak struk
+        $query = Order::with(['details.product'])
+            ->whereBetween(DB::raw('DATE(created_at)'), [$start, $end])
+            ->orderByDesc('created_at');
+
+        if ($request->status && $request->status !== 'Semua status') {
+            $dbStatus = strtolower($request->status) === 'selesai' ? 'success' : (strtolower($request->status) === 'dibatalkan' ? 'canceled' : 'pending');
+            $query->where('status', $dbStatus);
+        }
+
         $orders = $query->get();
         return response()->json([
             'summary' => [
