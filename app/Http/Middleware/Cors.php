@@ -15,16 +15,15 @@ class Cors
      */
     public function handle($request, Closure $next)
     {
-        // Daftar origin frontend yang diizinkan (sesuaikan jika memakai port lain)
-        $allowedOrigins = [
-            'http://localhost:8080',
-            'http://localhost:5173',
-            'http://127.0.0.1:8080',
-            'http://127.0.0.1:5173',
-        ];
+        // Mengambil daftar origin dari .env dan mengubahnya menjadi array
+        // Menggunakan default localhost:8080 jika variabel di .env kosong
+        $envOrigins = env('FRONTEND_URL', 'http://localhost:8080');
+        $allowedOrigins = array_map('trim', explode(',', $envOrigins));
 
         $origin = $request->headers->get('Origin');
-        $allowOrigin = in_array($origin, $allowedOrigins) ? $origin : 'http://localhost:8080';
+        
+        // Jika origin request cocok dengan salah satu di .env, izinkan. Jika tidak, fallback ke origin pertama
+        $allowOrigin = in_array($origin, $allowedOrigins) ? $origin : ($allowedOrigins[0] ?? 'http://localhost:8080');
 
         // Menangani request preflight (OPTIONS) dari browser/Axios
         if ($request->isMethod('OPTIONS')) {
