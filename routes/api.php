@@ -11,12 +11,6 @@ use Illuminate\Support\Facades\Route;
 Route::post('/login', 'AuthController@login');
 Route::post('/register', 'AuthController@register');
 Route::post('/payment/qris-webhook', 'PosController@qrisWebhook');
-Route::get('/test-koneksi', function () {
-    return response()->json([
-        'status'  => 'success',
-        'message' => 'Backend Laravel 6 berhasil terhubung dengan Frontend!'
-    ], 200);
-});
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', 'AuthController@logout');
@@ -37,6 +31,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/payment-qris/generate', 'PosController@generateQris');
     Route::get('/orders', 'PosController@listOrders');
     Route::post('/orders/report-order', 'PosController@reportOrder');
+    Route::post('/orders/{id}/pay', 'PosController@markAsPaid');
 
     // Analitik
     Route::get('/analytics/dashboard', 'AnalyticsController@dashboard');
