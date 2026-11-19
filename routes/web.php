@@ -11,6 +11,14 @@
 |
 */
 
-Route::get('/', function () {
+Route::get('/{any}', function () {
     return view('welcome');
+})->where("any",".*");
+
+Route::get('hello', function () {
+    return view('hello');
+});
+
+Route::get('hello-world', function () {
+    return 'Halo dunia';
 });
