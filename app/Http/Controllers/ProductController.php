@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use App\Models\Product;
@@ -22,18 +23,30 @@ class ProductController extends Controller
             public_path('storage'),
         ];
 
-        // Contoh jika ada folder publik terpisah di cPanel, aktifkan & sesuaikan jika perlu:
-        // $extraDir = '/home/USER_CPANEL/kasir.indorobotika.com/storage';
-        // if (is_dir(dirname($extraDir))) {
-        //     $dirs[] = $extraDir;
-        // }
-
         $normalized = array();
         foreach ($dirs as $d) {
             $normalized[] = rtrim($d, '/\\');
         }
 
         return array_values(array_unique($normalized));
+    }
+
+    /**
+     * Bersihkan cache terkait produk dan kategori agar data selalu segar.
+     */
+    private function clearProductCache()
+    {
+        $keys = [
+            'products_all_all',
+            'products_all_retail',
+            'products_all_resep',
+            'products_all_recipe',
+            'categories_all',
+        ];
+
+        foreach ($keys as $key) {
+            Cache::forget($key);
+        }
     }
 
     private function buildStorageUrl(Request $request, $relativePath)
@@ -136,7 +149,7 @@ class ProductController extends Controller
                 ProductRecipe::create([
                     'product_id'      => (int) $productId,
                     'raw_material_id' => (int) $r['raw_material_id'],
-                    'qty_needed'      => $r['qty_needed'],
+                    'qty_needed'      => (float) $r['qty_needed'],
                 ]);
             }
         }
@@ -178,6 +191,8 @@ class ProductController extends Controller
             'name' => $request->name,
             'slug' => Str::slug($request->name),
         ]);
+
+        $this->clearProductCache();
 
         return response()->json(['status' => 'success', 'data' => $cat]);
     }
@@ -258,6 +273,8 @@ class ProductController extends Controller
             throw $e;
         }
 
+        $this->clearProductCache();
+
         return response()->json([
             'status' => 'success',
             'data'   => $product->load(['category', 'recipes.rawMaterial', 'platformPrices']),
@@ -329,6 +346,8 @@ class ProductController extends Controller
             $this->deleteImageEverywhere($oldCoverUrl);
         }
 
+        $this->clearProductCache();
+
         return response()->json([
             'status' => 'success',
             'data'   => $product->load(['category', 'recipes.rawMaterial', 'platformPrices']),
@@ -350,6 +369,8 @@ class ProductController extends Controller
             $this->deleteImageEverywhere($oldCoverUrl);
         }
 
+        $this->clearProductCache();
+
         return response()->json(['status' => 'success']);
     }
 
@@ -361,6 +382,8 @@ class ProductController extends Controller
 
         $product = Product::findOrFail($id);
         $product->update(['stock' => (int) $request->actual_stock]);
+
+        $this->clearProductCache();
 
         return response()->json(['status' => 'success', 'data' => $product]);
     }

@@ -32,6 +32,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/orders', 'PosController@listOrders');
     Route::post('/orders/report-order', 'PosController@reportOrder');
     Route::post('/orders/{id}/pay', 'PosController@markAsPaid');
+    Route::post('/orders/{id}/cancel', 'PosController@cancelOrder');
 
     // Analitik
     Route::get('/analytics/dashboard', 'AnalyticsController@dashboard');

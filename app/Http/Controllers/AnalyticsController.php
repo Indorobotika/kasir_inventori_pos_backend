@@ -27,8 +27,8 @@ class AnalyticsController extends Controller
             ->selectRaw('COUNT(*) as orders, COALESCE(SUM(total_bill), 0) as revenue')
             ->first();
 
-        $todayRevenue = (float) $todayStats->revenue;
-        $todayCount   = (int) $todayStats->orders;
+        $todayRevenue = (float) ($todayStats->revenue ?? 0);
+        $todayCount   = (int) ($todayStats->orders ?? 0);
 
         // 2. Ringkasan Periode Berjalan (KPI)
         $periodStats = Order::where('status', 'success')
@@ -52,14 +52,14 @@ class AnalyticsController extends Controller
             ')
             ->first();
 
-        $netSales         = (float) $periodStats->net_sales;
-        $totalHpp         = (float) $periodStats->total_hpp;
+        $netSales         = (float) ($periodStats->net_sales ?? 0);
+        $totalHpp         = (float) ($periodStats->total_hpp ?? 0);
         $grossProfit      = $netSales - $totalHpp;
         $margin           = $netSales > 0 ? round(($grossProfit / $netSales) * 100, 1) : 0;
-        $totalBillPeriod  = (float) $periodStats->total_bill;
-        $transactionCount = (int) $periodStats->transactions;
+        $totalBillPeriod  = (float) ($periodStats->total_bill ?? 0);
+        $transactionCount = (int) ($periodStats->transactions ?? 0);
 
-        $itemsSold = (int) OrderDetail::join('orders', 'order_details.order_id', '=', 'orders.id')
+        $itemsSold = (float) OrderDetail::join('orders', 'order_details.order_id', '=', 'orders.id')
             ->where('orders.status', 'success')
             ->where('orders.created_at', '>=', $startDate)
             ->sum('order_details.quantity');
@@ -79,7 +79,7 @@ class AnalyticsController extends Controller
                 DB::raw('SUM(total_bill) as total'),
                 DB::raw('SUM(subtotal - discount_amount - total_cost) as profit')
             )
-            ->groupBy('date')
+            ->groupBy(DB::raw('DATE(created_at)'))
             ->get()
             ->keyBy('date');
 
@@ -97,36 +97,47 @@ class AnalyticsController extends Controller
             ];
         }
 
-        // 4. Produk Terlaris (Berdasarkan Omzet & Profit)
+        // 4. Produk & Bahan Terlaris (Berdasarkan Omzet & Profit)
         $topProducts = OrderDetail::join('orders', 'order_details.order_id', '=', 'orders.id')
-            ->join('products', 'order_details.product_id', '=', 'products.id')
+            ->leftJoin('products', 'order_details.product_id', '=', 'products.id')
+            ->leftJoin('raw_materials', 'order_details.raw_material_id', '=', 'raw_materials.id')
             ->where('orders.status', 'success')
             ->where('orders.created_at', '>=', $startDate)
             ->select(
-                'products.id',
-                'products.title',
-                'products.product_type',
-                DB::raw('SUM(order_details.quantity) as sold_qty'),
-                DB::raw('SUM(order_details.subtotal) as revenue'),
-                DB::raw('SUM(order_details.subtotal - (order_details.cost_product * order_details.quantity)) as profit')
+                DB::raw("COALESCE(order_details.product_id, order_details.raw_material_id) as id"),
+                DB::raw("CASE WHEN order_details.raw_material_id IS NOT NULL THEN 'raw_material' ELSE COALESCE(products.product_type, 'retail') END as product_type"),
+                DB::raw("CASE WHEN order_details.raw_material_id IS NOT NULL THEN 'raw_material' ELSE 'product' END as source_type"),
+                DB::raw("CONCAT(CASE WHEN order_details.raw_material_id IS NOT NULL THEN 'rm_' ELSE 'prod_' END, COALESCE(order_details.product_id, order_details.raw_material_id, order_details.id)) as unique_key"),
+                DB::raw("COALESCE(order_details.item_name, products.title, raw_materials.name, 'Item') as title"),
+                DB::raw("SUM(order_details.quantity) as sold_qty"),
+                DB::raw("SUM(order_details.subtotal) as revenue"),
+                DB::raw("SUM(order_details.subtotal - (order_details.cost_product * order_details.quantity)) as profit")
             )
-            ->groupBy('products.id', 'products.title', 'products.product_type')
+            ->groupBy(
+                'unique_key',
+                DB::raw("COALESCE(order_details.product_id, order_details.raw_material_id)"),
+                DB::raw("CASE WHEN order_details.raw_material_id IS NOT NULL THEN 'raw_material' ELSE COALESCE(products.product_type, 'retail') END"),
+                DB::raw("CASE WHEN order_details.raw_material_id IS NOT NULL THEN 'raw_material' ELSE 'product' END"),
+                DB::raw("COALESCE(order_details.item_name, products.title, raw_materials.name, 'Item')")
+            )
             ->orderByDesc('revenue')
             ->limit(10)
             ->get();
 
         // 5. Porsi per Kategori
+        $categoryExpr = "COALESCE(categories.name, 'Bahan Dijual')";
         $categoryShare = OrderDetail::join('orders', 'order_details.order_id', '=', 'orders.id')
-            ->join('products', 'order_details.product_id', '=', 'products.id')
-            ->join('categories', 'products.category_id', '=', 'categories.id')
+            ->leftJoin('products', 'order_details.product_id', '=', 'products.id')
+            ->leftJoin('raw_materials', 'order_details.raw_material_id', '=', 'raw_materials.id')
+            ->leftJoin('categories', DB::raw('COALESCE(products.category_id, raw_materials.category_id)'), '=', 'categories.id')
             ->where('orders.status', 'success')
             ->where('orders.created_at', '>=', $startDate)
             ->select(
-                'categories.name',
-                DB::raw('SUM(order_details.quantity) as qty'),
-                DB::raw('SUM(order_details.subtotal) as revenue')
+                DB::raw("{$categoryExpr} as name"),
+                DB::raw("SUM(order_details.quantity) as qty"),
+                DB::raw("SUM(order_details.subtotal) as revenue")
             )
-            ->groupBy('categories.id', 'categories.name')
+            ->groupBy(DB::raw($categoryExpr))
             ->orderByDesc('revenue')
             ->get();
 
@@ -142,14 +153,15 @@ class AnalyticsController extends Controller
             ->orderByDesc('total')
             ->get();
 
+        $platformExpr = "COALESCE(platform, 'Offline Store')";
         $platformShare = Order::where('status', 'success')
             ->where('created_at', '>=', $startDate)
             ->select(
-                DB::raw("COALESCE(platform, 'Offline Store') as platform"),
+                DB::raw("{$platformExpr} as platform"),
                 DB::raw('COUNT(*) as count'),
                 DB::raw('SUM(total_bill) as total')
             )
-            ->groupBy('platform')
+            ->groupBy(DB::raw($platformExpr))
             ->orderByDesc('total')
             ->get();
 
@@ -161,7 +173,7 @@ class AnalyticsController extends Controller
                 DB::raw('COUNT(*) as count'),
                 DB::raw('SUM(total_bill) as total')
             )
-            ->groupBy('hour')
+            ->groupBy(DB::raw('HOUR(created_at)'))
             ->orderBy('hour')
             ->get();
 
@@ -172,6 +184,24 @@ class AnalyticsController extends Controller
             ->select('id', 'title', 'stock', 'unit')
             ->get();
 
+        // 9. Valuasi Stok Saat Ini (Berbasis HPP / cost_price)
+        $rawMaterialsAll = RawMaterial::select('id', 'name', 'stock', 'cost_price')->get();
+        $rawMaterialValuation = $rawMaterialsAll->sum(function ($rm) {
+            return max(0, (float) ($rm->stock ?? 0)) * max(0, (float) ($rm->cost_price ?? 0));
+        });
+
+        $nonRecipeProductsAll = Product::select('id', 'title', 'product_type', 'stock', 'cost_price')->get()
+            ->filter(function ($prod) {
+                $pType = strtolower(trim((string) ($prod->product_type ?? 'retail')));
+                return !in_array($pType, ['resep', 'recipe'], true) && $prod->stock !== null;
+            });
+
+        $nonRecipeProductValuation = $nonRecipeProductsAll->sum(function ($prod) {
+            return max(0, (float) ($prod->stock ?? 0)) * max(0, (float) ($prod->cost_price ?? 0));
+        });
+
+        $totalInventoryValuation = $rawMaterialValuation + $nonRecipeProductValuation;
+
         return response()->json([
             'today' => [
                 'revenue'    => $todayRevenue,
@@ -180,17 +210,24 @@ class AnalyticsController extends Controller
             ],
             'kpi' => [
                 'net_sales'           => $netSales,
-                'net_sales_growth'    => $calcGrowth($netSales, (float) $prevStats->net_sales),
+                'net_sales_growth'    => $calcGrowth($netSales, (float) ($prevStats->net_sales ?? 0)),
                 'transactions'        => $transactionCount,
-                'transactions_growth' => $calcGrowth($transactionCount, (int) $prevStats->transactions),
+                'transactions_growth' => $calcGrowth($transactionCount, (int) ($prevStats->transactions ?? 0)),
                 'hpp'                 => $totalHpp,
-                'total_discount'      => (float) $periodStats->total_discount,
+                'total_discount'      => (float) ($periodStats->total_discount ?? 0),
                 'items_sold'          => $itemsSold,
                 'gross_profit'        => $grossProfit,
-                'profit_growth'       => $calcGrowth($grossProfit, (float) $prevStats->gross_profit),
+                'profit_growth'       => $calcGrowth($grossProfit, (float) ($prevStats->gross_profit ?? 0)),
                 'margin_percent'      => $margin,
                 'avg_transaction'     => $transactionCount > 0 ? round($totalBillPeriod / $transactionCount) : 0,
                 'total_bill'          => $totalBillPeriod,
+            ],
+            'inventory_valuation' => [
+                'total_valuation'              => round($totalInventoryValuation, 2),
+                'raw_material_valuation'       => round($rawMaterialValuation, 2),
+                'raw_material_count'           => $rawMaterialsAll->count(),
+                'non_recipe_product_valuation' => round($nonRecipeProductValuation, 2),
+                'non_recipe_product_count'     => $nonRecipeProductsAll->count(),
             ],
             'daily_trend'         => $dailyTrend,
             'top_products'        => $topProducts,

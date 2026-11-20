@@ -22,18 +22,26 @@ class CrudExtraController extends Controller
             public_path('storage'),
         ];
 
-        // Contoh jika ada folder publik terpisah di cPanel, aktifkan & sesuaikan jika perlu:
-        // $extraDir = '/home/USER_CPANEL/kasir.indorobotika.com/storage';
-        // if (is_dir(dirname($extraDir))) {
-        //     $dirs[] = $extraDir;
-        // }
-
         $normalized = array();
         foreach ($dirs as $d) {
             $normalized[] = rtrim($d, '/\\');
         }
 
         return array_values(array_unique($normalized));
+    }
+
+    /**
+     * Bersihkan cache promo & pengaturan toko agar perubahan langsung aktif.
+     */
+    private function clearExtraCache($includeSettings = true, $includePromotions = true)
+    {
+        if ($includePromotions) {
+            Cache::forget('promotions_all');
+        }
+
+        if ($includeSettings) {
+            Cache::forget('store_settings');
+        }
     }
 
     private function buildPublicStorageUrl(Request $request, $relativePath)
@@ -147,7 +155,7 @@ class CrudExtraController extends Controller
             'is_active'        => isset($validated['is_active']) ? (bool) $validated['is_active'] : true,
         ]);
 
-        Cache::forget('promotions_all');
+        $this->clearExtraCache(false, true);
 
         return response()->json(['status' => 'success', 'data' => $promo]);
     }
@@ -177,7 +185,7 @@ class CrudExtraController extends Controller
 
         $promo->update($payload);
 
-        Cache::forget('promotions_all');
+        $this->clearExtraCache(false, true);
 
         return response()->json(['status' => 'success', 'data' => $promo]);
     }
@@ -187,7 +195,7 @@ class CrudExtraController extends Controller
         $promo = Promotion::findOrFail($id);
         $promo->delete();
 
-        Cache::forget('promotions_all');
+        $this->clearExtraCache(false, true);
 
         return response()->json(['status' => 'success']);
     }
@@ -282,7 +290,7 @@ class CrudExtraController extends Controller
             }
         }
 
-        Cache::forget('store_settings');
+        $this->clearExtraCache(true, false);
 
         return response()->json([
             'status'  => 'success',
