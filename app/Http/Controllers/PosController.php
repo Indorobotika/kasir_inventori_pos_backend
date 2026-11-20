@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
+use Carbon\Carbon;
 use App\Models\Order;
 use App\Models\OrderDetail;
 use App\Models\OrderCancellationReport;
@@ -34,6 +35,43 @@ class PosController extends Controller
         }
     }
 
+    /**
+     * Cek apakah platform penjualan termasuk channel marketplace (bukan toko offline).
+     */
+    private function isMarketplacePlatform($platform)
+    {
+        $normalized = strtolower(trim((string) $platform));
+        return $normalized !== '' && !in_array($normalized, ['offline store', 'offline', 'pos', 'toko'], true);
+    }
+
+    /**
+     * Hitung nominal uang riil bersih yang masuk ke cashflow (sudah bebas dari PPN toko).
+     */
+    private function calculateCleanCashflowAmount(Order $order)
+    {
+        $totalBill = (float) ($order->total_bill ?? 0);
+        $tax       = (float) ($order->tax ?? 0);
+
+        return max(0, round($totalBill - $tax, 2));
+    }
+
+    /**
+     * Catat arus kas masuk bersih ke tabel cashflows.
+     */
+    private function recordCleanSaleCashflow(Order $order, $category, $description)
+    {
+        $cleanAmount = $this->calculateCleanCashflowAmount($order);
+
+        Cashflow::create([
+            'user_id'          => $order->user_id,
+            'type'             => 'IN',
+            'category'         => $category,
+            'amount'           => $cleanAmount,
+            'description'      => $description,
+            'transaction_date' => now()->toDateString(),
+        ]);
+    }
+
     public function paymentPos(Request $request)
     {
         $request->validate([
@@ -49,7 +87,7 @@ class PosController extends Controller
 
             $platform = $request->platform ?? 'Offline Store';
             $setting  = Setting::first();
-            $taxRate  = $setting ? $setting->tax : 11;
+            $taxRate  = $setting ? (float) $setting->tax : 11;
 
             $subtotal      = 0;
             $totalCost     = 0;
@@ -105,6 +143,7 @@ class PosController extends Controller
                         ->lockForUpdate()
                         ->findOrFail($item['id']);
 
+                    // Ambil harga platform bila tersedia tanpa mengubah harga master produk ($product->price)
                     $platformPrice = $product->platformPrices->where('platform_name', $platform)->first();
                     $unitPrice     = (float) ($platformPrice ? $platformPrice->price : $product->price);
                     $unitCost      = (float) ($product->cost_price ?? 0);
@@ -180,29 +219,46 @@ class PosController extends Controller
                     : $promo->result;
             }
 
-            $afterDiscount = max(0, $subtotal - $discountAmount);
-            $taxAmount     = round($afterDiscount * ($taxRate / 100));
-            $totalBill     = $afterDiscount + $taxAmount;
+            $afterDiscount       = max(0, $subtotal - $discountAmount);
+            $isMarketplaceFinal  = $this->isMarketplacePlatform($platform)
+                && filter_var($request->input('is_marketplace_final_price', false), FILTER_VALIDATE_BOOLEAN)
+                && $request->filled('final_received_price');
+
+            if ($isMarketplaceFinal) {
+                $finalReceivedPrice = max(0, round((float) $request->input('final_received_price'), 2));
+                $supplierSalesTax   = $request->filled('supplier_sales_tax')
+                    ? max(0, round((float) $request->input('supplier_sales_tax'), 2))
+                    : max(0, round($afterDiscount - $finalReceivedPrice, 2));
+
+                // Pada Pola A marketplace, PPN kasir offline tidak dihitung ganda dan total_bill adalah dana bersih diterima
+                $taxAmount = 0;
+                $totalBill = $finalReceivedPrice;
+            } else {
+                $supplierSalesTax = max(0, round((float) $request->input('supplier_sales_tax', 0), 2));
+                $taxAmount        = round($afterDiscount * ($taxRate / 100));
+                $totalBill        = $afterDiscount + $taxAmount;
+            }
 
             $cashReceived = (float) ($request->nominalCash ?? $totalBill);
             $cashChange   = $request->payment_method === 'CASH' ? max(0, $cashReceived - $totalBill) : 0;
             $orderStatus  = $request->payment_method === 'QRIS' ? 'pending' : 'success';
 
             $order = Order::create([
-                'invoice_number'  => 'INV-' . date('ymd') . '-' . rand(10000000, 99999999),
-                'user_id'         => $request->user()->id,
-                'customer_name'   => $request->customer_name ?? 'Umum',
-                'platform'        => $platform,
-                'payment_method'  => $request->payment_method,
-                'numberCard'      => $request->numberCard,
-                'subtotal'        => $subtotal,
-                'discount_amount' => $discountAmount,
-                'tax'             => $taxAmount,
-                'total_cost'      => $totalCost,
-                'total_bill'      => $totalBill,
-                'cash_received'   => $cashReceived,
-                'cash_change'     => $cashChange,
-                'status'          => $orderStatus,
+                'invoice_number'     => 'INV-' . date('ymd') . '-' . rand(10000000, 99999999),
+                'user_id'            => $request->user()->id,
+                'customer_name'      => $request->customer_name ?? 'Umum',
+                'platform'           => $platform,
+                'payment_method'     => $request->payment_method,
+                'numberCard'         => $request->numberCard,
+                'subtotal'           => $subtotal,
+                'discount_amount'    => $discountAmount,
+                'tax'                => $taxAmount,
+                'supplier_sales_tax' => $supplierSalesTax,
+                'total_cost'         => $totalCost,
+                'total_bill'         => $totalBill,
+                'cash_received'      => $cashReceived,
+                'cash_change'        => $cashChange,
+                'status'             => $orderStatus,
             ]);
 
             foreach ($preparedItems as $pItem) {
@@ -212,14 +268,11 @@ class PosController extends Controller
             }
 
             if ($orderStatus === 'success') {
-                Cashflow::create([
-                    'user_id'          => $request->user()->id,
-                    'type'             => 'IN',
-                    'category'         => 'Penjualan Kasir',
-                    'amount'           => $totalBill,
-                    'description'      => 'Pendapatan Order #' . $order->invoice_number,
-                    'transaction_date' => now()->toDateString(),
-                ]);
+                $this->recordCleanSaleCashflow(
+                    $order,
+                    'Penjualan Kasir',
+                    'Pendapatan Bersih Order #' . $order->invoice_number
+                );
             }
 
             $this->clearInventoryCache();
@@ -227,11 +280,12 @@ class PosController extends Controller
             return response()->json([
                 'status' => 'success',
                 'data'   => [
-                    'order_id'       => $order->id,
-                    'invoice_number' => $order->invoice_number,
-                    'total_bill'     => $totalBill,
-                    'cash_change'    => $cashChange,
-                    'status'         => $order->status,
+                    'order_id'           => $order->id,
+                    'invoice_number'     => $order->invoice_number,
+                    'supplier_sales_tax' => $supplierSalesTax,
+                    'total_bill'         => $totalBill,
+                    'cash_change'        => $cashChange,
+                    'status'             => $order->status,
                 ],
             ]);
         });
@@ -265,14 +319,11 @@ class PosController extends Controller
             if ($order->status !== 'success') {
                 $order->update(['status' => 'success']);
 
-                Cashflow::create([
-                    'user_id'          => $order->user_id,
-                    'type'             => 'IN',
-                    'category'         => 'Penjualan Kasir (QRIS)',
-                    'amount'           => $order->total_bill,
-                    'description'      => 'Pelunasan QRIS Order #' . $order->invoice_number,
-                    'transaction_date' => now()->toDateString(),
-                ]);
+                $this->recordCleanSaleCashflow(
+                    $order,
+                    'Penjualan Kasir (QRIS)',
+                    'Pelunasan QRIS Bersih Order #' . $order->invoice_number
+                );
 
                 $this->clearInventoryCache();
             }
@@ -305,30 +356,57 @@ class PosController extends Controller
 
     public function listOrders(Request $request)
     {
-        $start = $request->start_date ?? date('Y-m-d');
-        $end   = $request->end_date ?? date('Y-m-d');
+        $startStr = $request->query('start_date') ?? now()->toDateString();
+        $endStr   = $request->query('end_date') ?? now()->toDateString();
+
+        $startAt = Carbon::parse($startStr)->startOfDay()->toDateTimeString();
+        $endAt   = Carbon::parse($endStr)->endOfDay()->toDateTimeString();
+
+        $allowedSizes = [10, 20, 50];
+        $perPage = (int) $request->query('per_page', 10);
+        if (!in_array($perPage, $allowedSizes, true)) {
+            $perPage = 10;
+        }
 
         $query = Order::with(['details.product', 'details.rawMaterial'])
-            ->whereBetween(DB::raw('DATE(created_at)'), [$start, $end])
+            ->whereBetween('created_at', [$startAt, $endAt])
             ->orderByDesc('created_at');
 
-        if ($request->status && $request->status !== 'Semua status') {
-            $dbStatus = strtolower($request->status) === 'selesai'
+        if ($request->filled('status') && $request->query('status') !== 'Semua status') {
+            $statusParam = strtolower(trim((string) $request->query('status')));
+            $dbStatus = $statusParam === 'selesai' || $statusParam === 'success'
                 ? 'success'
-                : (strtolower($request->status) === 'dibatalkan' ? 'canceled' : 'pending');
+                : (($statusParam === 'dibatalkan' || $statusParam === 'canceled') ? 'canceled' : 'pending');
             $query->where('status', $dbStatus);
         }
 
-        $orders = $query->get();
+        $search = trim((string) $request->query('search', ''));
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('invoice_number', 'like', '%' . $search . '%')
+                  ->orWhere('customer_name', 'like', '%' . $search . '%');
+            });
+        }
+
+        $allMatching = (clone $query)->get();
+        $paginated   = $query->paginate($perPage);
 
         return response()->json([
             'summary' => [
-                'total_transactions' => $orders->where('status', 'success')->count(),
-                'omzet'              => $orders->where('status', 'success')->sum('total_bill'),
-                'pending'            => $orders->where('status', 'pending')->count(),
-                'canceled'           => $orders->where('status', 'canceled')->count(),
+                'total_transactions' => $allMatching->where('status', 'success')->count(),
+                'omzet'              => $allMatching->where('status', 'success')->sum('total_bill'),
+                'pending'            => $allMatching->where('status', 'pending')->count(),
+                'canceled'           => $allMatching->where('status', 'canceled')->count(),
             ],
-            'orders'  => $orders,
+            'orders'     => $paginated->items(),
+            'pagination' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page'    => $paginated->lastPage(),
+                'per_page'     => $paginated->perPage(),
+                'total'        => $paginated->total(),
+                'from'         => $paginated->firstItem() ?? 0,
+                'to'           => $paginated->lastItem() ?? 0,
+            ],
         ]);
     }
 
@@ -346,14 +424,11 @@ class PosController extends Controller
 
             $order->update(['status' => 'success']);
 
-            Cashflow::create([
-                'user_id'          => $order->user_id,
-                'type'             => 'IN',
-                'category'         => 'Penjualan Kasir (QRIS/Pelunasan)',
-                'amount'           => $order->total_bill,
-                'description'      => 'Pelunasan Order #' . $order->invoice_number,
-                'transaction_date' => now()->toDateString(),
-            ]);
+            $this->recordCleanSaleCashflow(
+                $order,
+                'Penjualan Kasir (QRIS/Pelunasan)',
+                'Pelunasan Bersih Order #' . $order->invoice_number
+            );
 
             $this->clearInventoryCache();
 

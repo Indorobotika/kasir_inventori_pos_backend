@@ -155,6 +155,32 @@ class ProductController extends Controller
         }
     }
 
+    private function resolvePerPage(Request $request)
+    {
+        $allowedSizes = [10, 20, 50];
+        $perPage = (int) $request->query('per_page', 10);
+        if (!in_array($perPage, $allowedSizes, true)) {
+            $perPage = 10;
+        }
+        return $perPage;
+    }
+
+    private function formatPaginatedResponse($paginated)
+    {
+        return response()->json([
+            'status'     => 'success',
+            'data'       => $paginated->items(),
+            'pagination' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page'    => $paginated->lastPage(),
+                'per_page'     => $paginated->perPage(),
+                'total'        => $paginated->total(),
+                'from'         => $paginated->firstItem() ?? 0,
+                'to'           => $paginated->lastItem() ?? 0,
+            ],
+        ]);
+    }
+
     private function buildProductQuery($categoryId, $search = '')
     {
         $query = Product::with(['category', 'recipes.rawMaterial', 'platformPrices'])
@@ -200,23 +226,39 @@ class ProductController extends Controller
     public function index(Request $request)
     {
         $categoryId = $request->filled('category_id') ? (int) $request->category_id : null;
-        $search     = trim((string) $request->get('q', ''));
-        $products   = $this->buildProductQuery($categoryId, $search)->get();
+        $rawSearch  = $request->query('search', $request->query('q', ''));
+        $search     = trim((string) $rawSearch);
+        $perPage    = $this->resolvePerPage($request);
 
-        return response()->json(['data' => $products]);
+        $paginated = $this->buildProductQuery($categoryId, $search)->paginate($perPage);
+
+        return $this->formatPaginatedResponse($paginated);
     }
 
     public function productsByCategorySlug(Request $request, $slug)
     {
+        $perPage  = $this->resolvePerPage($request);
+        $search   = trim((string) $request->query('search', $request->query('q', '')));
         $category = Category::where('slug', $slug)->first();
 
         if (!$category) {
-            return response()->json(['data' => []]);
+            return response()->json([
+                'status'     => 'success',
+                'data'       => [],
+                'pagination' => [
+                    'current_page' => 1,
+                    'last_page'    => 1,
+                    'per_page'     => $perPage,
+                    'total'        => 0,
+                    'from'         => 0,
+                    'to'           => 0,
+                ],
+            ]);
         }
 
-        $products = $this->buildProductQuery((int) $category->id)->get();
+        $paginated = $this->buildProductQuery((int) $category->id, $search)->paginate($perPage);
 
-        return response()->json(['data' => $products]);
+        return $this->formatPaginatedResponse($paginated);
     }
 
     public function store(Request $request)

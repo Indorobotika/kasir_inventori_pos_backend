@@ -127,10 +127,46 @@ class RawMaterialController extends Controller
         }
     }
 
-    public function index()
+    public function index(Request $request)
     {
-        $rawMaterials = RawMaterial::with('category')->orderByDesc('id')->get();
-        return response()->json(['data' => $rawMaterials]);
+        $allowedSizes = [10, 20, 50];
+        $perPage = (int) $request->query('per_page', 10);
+        if (!in_array($perPage, $allowedSizes, true)) {
+            $perPage = 10;
+        }
+
+        $query = RawMaterial::with('category')->orderByDesc('id');
+
+        $search = trim((string) $request->query('search', ''));
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', '%' . $search . '%')
+                  ->orWhere('unit', 'like', '%' . $search . '%');
+            });
+        }
+
+        if ($request->filled('category_id')) {
+            $query->where('category_id', (int) $request->query('category_id'));
+        }
+
+        if ($request->has('is_sellable') && $request->query('is_sellable') !== '' && $request->query('is_sellable') !== null) {
+            $query->where('is_sellable', filter_var($request->query('is_sellable'), FILTER_VALIDATE_BOOLEAN) ? 1 : 0);
+        }
+
+        $paginated = $query->paginate($perPage);
+
+        return response()->json([
+            'status'     => 'success',
+            'data'       => $paginated->items(),
+            'pagination' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page'    => $paginated->lastPage(),
+                'per_page'     => $paginated->perPage(),
+                'total'        => $paginated->total(),
+                'from'         => $paginated->firstItem() ?? 0,
+                'to'           => $paginated->lastItem() ?? 0,
+            ],
+        ]);
     }
 
     public function store(Request $request)

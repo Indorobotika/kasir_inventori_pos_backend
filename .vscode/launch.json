@@ -7,7 +7,7 @@
             "request": "launch",
             "port": 9000,
             "pathMappings": {
-                "C:\\xampp\\htdocs\\backend": "${workspaceFolder}"
+                "C:\\xampp\\htdocs\\api-kasir-backend": "${workspaceFolder}"
             }
         }
     ]
