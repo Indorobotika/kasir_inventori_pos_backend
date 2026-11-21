@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Carbon\Carbon;
 use App\Models\Cashflow;
+use App\Models\Order;
 
 class CashflowController extends Controller
 {
@@ -84,6 +86,33 @@ class CashflowController extends Controller
             return $r->type === 'IN' ? (float) $r->amount : -((float) $r->amount);
         });
 
+        // Hitung Dana CSR terkumpul & tersalurkan pada bulan terpilih
+        try {
+            $monthStart = Carbon::createFromFormat('Y-m', $month)->startOfMonth()->toDateTimeString();
+            $monthEnd   = Carbon::createFromFormat('Y-m', $month)->endOfMonth()->toDateTimeString();
+        } catch (\Exception $e) {
+            $monthStart = Carbon::now()->startOfMonth()->toDateTimeString();
+            $monthEnd   = Carbon::now()->endOfMonth()->toDateTimeString();
+        }
+
+        $csrCollected = round((float) Order::where('status', 'success')
+            ->whereBetween('created_at', [$monthStart, $monthEnd])
+            ->sum('csr_amount'), 2);
+
+        $csrDisbursed = round((float) $allMonthRecords
+            ->where('type', 'OUT')
+            ->filter(function ($r) {
+                return strtolower(trim((string) ($r->category ?? ''))) === 'dana csr';
+            })
+            ->sum('amount'), 2);
+
+        // Saldo sisa Dana CSR kumulatif sepanjang waktu
+        $totalCsrCollectedAll = (float) Order::where('status', 'success')->sum('csr_amount');
+        $totalCsrDisbursedAll = (float) Cashflow::where('type', 'OUT')
+            ->whereRaw("LOWER(TRIM(COALESCE(category, ''))) = 'dana csr'")
+            ->sum('amount');
+        $csrRemaining = max(0, round($totalCsrCollectedAll - $totalCsrDisbursedAll, 2));
+
         // Query terurut descending berdasarkan tanggal masuk terbaru paling atas
         $query = Cashflow::where('transaction_date', 'like', $month . '%')
             ->orderByDesc('transaction_date')
@@ -126,11 +155,14 @@ class CashflowController extends Controller
             'status' => 'success',
             'data'   => [
                 'summary' => [
-                    'in'           => $in,
-                    'out'          => $out,
-                    'balance'      => $balance,
-                    'cash_balance' => $cashBalance,
-                    'bank_balance' => $bankBalance,
+                    'in'            => $in,
+                    'out'           => $out,
+                    'balance'       => $balance,
+                    'cash_balance'  => $cashBalance,
+                    'bank_balance'  => $bankBalance,
+                    'csr_collected' => $csrCollected,
+                    'csr_disbursed' => $csrDisbursed,
+                    'csr_remaining' => $csrRemaining,
                 ],
                 'records'    => $paginated->items(),
                 'pagination' => [

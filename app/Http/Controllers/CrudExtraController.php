@@ -210,6 +210,7 @@ class CrudExtraController extends Controller
                     'location_store' => '',
                     'contact'        => '',
                     'tax'            => 11,
+                    'csr_percentage' => 0,
                     'logo_path_url'  => '',
                     'qris_path_url'  => '',
                     'receipt_width'  => '58 mm',
@@ -228,6 +229,7 @@ class CrudExtraController extends Controller
             'location_store' => 'nullable|string|max:500',
             'contact'        => 'nullable|string|max:50',
             'tax'            => 'required|numeric|min:0|max:100',
+            'csr_percentage' => 'nullable|numeric|min:0|max:100',
             'logo'           => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
             'qris'           => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
             'remove_logo'    => 'nullable|boolean',
@@ -237,6 +239,10 @@ class CrudExtraController extends Controller
         ]);
 
         $setting = Setting::firstOrCreate(['id' => 1]);
+
+        $validatedData['csr_percentage'] = isset($validatedData['csr_percentage'])
+            ? round(max(0, min(100, (float) $validatedData['csr_percentage'])), 2)
+            : (float) ($setting->csr_percentage ?? 0);
 
         $oldLogoUrl = $setting->logo_path_url;
         $oldQrisUrl = $setting->qris_path_url;

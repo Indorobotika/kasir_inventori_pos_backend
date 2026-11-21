@@ -56,6 +56,33 @@ class PosController extends Controller
     }
 
     /**
+     * Hitung alokasi Dana CSR (%) dari net keuntungan order:
+     * Net Keuntungan = max(0, (total_bill - tax) - total_cost).
+     */
+    private function calculateOrderCsr(Order $order, ?Setting $setting = null)
+    {
+        $setting = $setting ?: Setting::first();
+        $csrPercentage = $setting ? max(0, min(100, (float) ($setting->csr_percentage ?? 0))) : 0;
+
+        if ($csrPercentage <= 0) {
+            return [
+                'csr_percentage' => 0,
+                'csr_amount'     => 0,
+            ];
+        }
+
+        $netRevenue = $this->calculateCleanCashflowAmount($order);
+        $totalCost  = (float) ($order->total_cost ?? 0);
+        $netProfit  = max(0, round($netRevenue - $totalCost, 2));
+        $csrAmount  = round($netProfit * ($csrPercentage / 100), 2);
+
+        return [
+            'csr_percentage' => $csrPercentage,
+            'csr_amount'     => $csrAmount,
+        ];
+    }
+
+    /**
      * Catat arus kas masuk bersih ke tabel cashflows.
      */
     private function recordCleanSaleCashflow(Order $order, $category, $description)
@@ -255,6 +282,8 @@ class PosController extends Controller
                 'tax'                => $taxAmount,
                 'supplier_sales_tax' => $supplierSalesTax,
                 'total_cost'         => $totalCost,
+                'csr_percentage'     => 0,
+                'csr_amount'         => 0,
                 'total_bill'         => $totalBill,
                 'cash_received'      => $cashReceived,
                 'cash_change'        => $cashChange,
@@ -268,6 +297,9 @@ class PosController extends Controller
             }
 
             if ($orderStatus === 'success') {
+                $csrData = $this->calculateOrderCsr($order, $setting);
+                $order->update($csrData);
+
                 $this->recordCleanSaleCashflow(
                     $order,
                     'Penjualan Kasir',
@@ -283,6 +315,8 @@ class PosController extends Controller
                     'order_id'           => $order->id,
                     'invoice_number'     => $order->invoice_number,
                     'supplier_sales_tax' => $supplierSalesTax,
+                    'csr_percentage'     => $order->csr_percentage,
+                    'csr_amount'         => $order->csr_amount,
                     'total_bill'         => $totalBill,
                     'cash_change'        => $cashChange,
                     'status'             => $order->status,
@@ -317,7 +351,8 @@ class PosController extends Controller
 
         if (in_array($request->transaction_status, ['settlement', 'capture'])) {
             if ($order->status !== 'success') {
-                $order->update(['status' => 'success']);
+                $csrData = $this->calculateOrderCsr($order);
+                $order->update(array_merge(['status' => 'success'], $csrData));
 
                 $this->recordCleanSaleCashflow(
                     $order,
@@ -328,7 +363,11 @@ class PosController extends Controller
                 $this->clearInventoryCache();
             }
         } elseif (in_array($request->transaction_status, ['cancel', 'expire'])) {
-            $order->update(['status' => 'canceled']);
+            $order->update([
+                'status'         => 'canceled',
+                'csr_percentage' => 0,
+                'csr_amount'     => 0,
+            ]);
             $this->clearInventoryCache();
         }
 
@@ -388,13 +427,15 @@ class PosController extends Controller
             });
         }
 
-        $allMatching = (clone $query)->get();
-        $paginated   = $query->paginate($perPage);
+        $allMatching   = (clone $query)->get();
+        $successOrders = $allMatching->where('status', 'success');
+        $paginated     = $query->paginate($perPage);
 
         return response()->json([
             'summary' => [
-                'total_transactions' => $allMatching->where('status', 'success')->count(),
-                'omzet'              => $allMatching->where('status', 'success')->sum('total_bill'),
+                'total_transactions' => $successOrders->count(),
+                'omzet'              => $successOrders->sum('total_bill'),
+                'csr_allocated'      => round((float) $successOrders->sum('csr_amount'), 2),
                 'pending'            => $allMatching->where('status', 'pending')->count(),
                 'canceled'           => $allMatching->where('status', 'canceled')->count(),
             ],
@@ -422,7 +463,8 @@ class PosController extends Controller
                 ], 400);
             }
 
-            $order->update(['status' => 'success']);
+            $csrData = $this->calculateOrderCsr($order);
+            $order->update(array_merge(['status' => 'success'], $csrData));
 
             $this->recordCleanSaleCashflow(
                 $order,

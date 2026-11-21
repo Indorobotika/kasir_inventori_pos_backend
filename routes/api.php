@@ -18,6 +18,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Kategori & Produk
     Route::get('/categories', 'ProductController@categories');
     Route::post('/categories', 'ProductController@storeCategory');
+    Route::delete('/categories/{id}', 'ProductController@destroyCategory');
     Route::get('/categories/slug/{slug}', 'ProductController@productsByCategorySlug');
     Route::apiResource('/products', 'ProductController');
     Route::post('/products/{id}/opname', 'ProductController@stockOpname');

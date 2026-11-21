@@ -223,6 +223,27 @@ class ProductController extends Controller
         return response()->json(['status' => 'success', 'data' => $cat]);
     }
 
+    public function destroyCategory($id)
+    {
+        $category = Category::findOrFail($id);
+
+        $usedCount = Product::where('category_id', $category->id)->count();
+        if ($usedCount > 0) {
+            return response()->json([
+                'status'  => 'warning',
+                'message' => "Kategori \"{$category->name}\" tidak dapat dihapus karena masih digunakan oleh {$usedCount} produk.",
+            ], 422);
+        }
+
+        $category->delete();
+        $this->clearProductCache();
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Kategori \"{$category->name}\" berhasil dihapus.",
+        ]);
+    }
+
     public function index(Request $request)
     {
         $categoryId = $request->filled('category_id') ? (int) $request->category_id : null;
